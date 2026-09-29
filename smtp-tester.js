@@ -642,6 +642,22 @@ function viberEvent(j) {
     viberUsers.set(u.id, { id: u.id, name: u.name || '', event: j.event, t: Date.now() });
 }
 
+async function setViberWebhook(b) {
+  const out = o => o;
+  try {
+    const token = String(b.token || '').trim();
+    let url = String(b.url || '').trim();
+    if (!token) return out({ ok: false, msg: 'Enter the Bot auth token first.' });
+    if (url && !/^https:\/\//i.test(url)) return out({ ok: false, msg: 'Webhook URL must start with https://' });
+    if (url && !/\/viber\/webhook$/.test(url)) url = url.replace(/\/+$/, '') + '/viber/webhook';
+    const payload = url ? { url, event_types: ['subscribed', 'unsubscribed', 'conversation_started', 'message'] } : { url: '' };
+    const r = await httpReq('https://chatapi.viber.com/pa/set_webhook', 'POST', { 'X-Viber-Auth-Token': token, 'Content-Type': 'application/json' }, JSON.stringify(payload));
+    let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
+    const good = Number(j.status) === 0;
+    return out({ ok: good, msg: good ? (url ? 'Webhook set: ' + url : 'Webhook removed.') : 'Viber said: ' + (j.status_message || 'HTTP ' + r.status) + (r.status === 403 || /webhook/i.test(j.status_message || '') ? ' (Viber must be able to reach ' + url + ' - is the site publicly reachable?)' : '') });
+  } catch (e) { return { ok: false, msg: 'Failed: ' + e.message }; }
+}
+
 const server = http.createServer(async (req, res) => {
   // Viber calls this through your tunnel; everything else is local-only.
   if (req.method === 'POST' && req.url === '/viber/webhook') {
@@ -669,20 +685,9 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify([...viberUsers.values()].sort((a, b) => b.t - a.t)));
   }
   if (req.method === 'POST' && req.url === '/api/viber/webhook') {
-    const out = o => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
-    try {
-      const b = await readBody(req);
-      const token = String(b.token || '').trim();
-      let url = String(b.url || '').trim();
-      if (!token) return out({ ok: false, msg: 'Enter the Bot auth token first.' });
-      if (url && !/^https:\/\//i.test(url)) return out({ ok: false, msg: 'Webhook URL must start with https://' });
-      if (url && !/\/viber\/webhook$/.test(url)) url = url.replace(/\/+$/, '') + '/viber/webhook';
-      const payload = url ? { url, event_types: ['subscribed', 'unsubscribed', 'conversation_started', 'message'] } : { url: '' };
-      const r = await httpReq('https://chatapi.viber.com/pa/set_webhook', 'POST', { 'X-Viber-Auth-Token': token, 'Content-Type': 'application/json' }, JSON.stringify(payload));
-      let j = {}; try { j = JSON.parse(r.text); } catch (_) {}
-      const good = Number(j.status) === 0;
-      return out({ ok: good, msg: good ? (url ? 'Webhook set: ' + url : 'Webhook removed.') : 'Viber said: ' + (j.status_message || 'HTTP ' + r.status) + (r.status === 403 || /webhook/i.test(j.status_message || '') ? ' (Viber must be able to reach ' + url + ' - is ngrok running on port ' + PORT + '?)' : '') });
-    } catch (e) { return out({ ok: false, msg: 'Failed: ' + e.message }); }
+    let o; try { o = await setViberWebhook(await readBody(req)); } catch (e) { o = { ok: false, msg: 'Failed: ' + e.message }; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify(o));
   }
   if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -705,17 +710,22 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end('Not found');
 });
 
-server.on('error', e => {
-  console.error(e.code === 'EADDRINUSE' ? 'Port ' + PORT + ' is busy. Try:  PORT=3001 node smtp-tester.js' : e.message);
-  process.exit(1);
-});
-if (PUBLIC_BIND && !process.env.ACCESS_PASS) { console.error('Refusing to listen on ' + BIND + ' without ACCESS_PASS. Set a strong ACCESS_PASS first.'); process.exit(1); }
-server.listen(PORT, BIND, () => {
-  const url = 'http://localhost:' + PORT;
-  console.log('SMTP Tester running at ' + url + '  (Ctrl+C to stop)');
-  console.log(process.env.ACCESS_PASS ? 'Tunnel access ON (password protected). Username: anything, Password: your ACCESS_PASS.' : 'Tunnel access OFF. To open it via ngrok set ACCESS_PASS first (see instructions).');
-  if (!process.env.NO_OPEN) {
-    const c = process.platform === 'win32' ? 'start "" "' + url + '"' : process.platform === 'darwin' ? 'open ' + url : 'xdg-open ' + url;
-    exec(c, () => {});
-  }
-});
+module.exports = { HTML, runTest, runSms, setViberWebhook };
+
+// Only start the local server when run directly (node smtp-tester.js), not when imported by the Netlify Function.
+if (require.main === module) {
+  server.on('error', e => {
+    console.error(e.code === 'EADDRINUSE' ? 'Port ' + PORT + ' is busy. Try:  PORT=3001 node smtp-tester.js' : e.message);
+    process.exit(1);
+  });
+  if (PUBLIC_BIND && !process.env.ACCESS_PASS) { console.error('Refusing to listen on ' + BIND + ' without ACCESS_PASS. Set a strong ACCESS_PASS first.'); process.exit(1); }
+  server.listen(PORT, BIND, () => {
+    const url = 'http://localhost:' + PORT;
+    console.log('SMTP Tester running at ' + url + '  (Ctrl+C to stop)');
+    console.log(process.env.ACCESS_PASS ? 'Tunnel access ON (password protected). Username: anything, Password: your ACCESS_PASS.' : 'Tunnel access OFF. To open it via ngrok set ACCESS_PASS first (see instructions).');
+    if (!process.env.NO_OPEN) {
+      const c = process.platform === 'win32' ? 'start "" "' + url + '"' : process.platform === 'darwin' ? 'open ' + url : 'xdg-open ' + url;
+      exec(c, () => {});
+    }
+  });
+}
